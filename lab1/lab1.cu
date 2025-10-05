@@ -53,9 +53,9 @@ int main() {
     CSC(cudaFree(d_b));
     CSC(cudaFree(d_c));
 
-    std::cout << std::setprecision(10) << std::fixed;
+    std::cout << std::scientific << std::setprecision(10);
     for (size_t i = 0; i < n; ++i) {
-        std::cout << h_c[i] << '\n';
+        std::cout << h_c[i] << ' ';
     }
 
     return 0;
