@@ -82,7 +82,7 @@ __global__ void prewittKernel(cudaTextureObject_t tex, uint8_t* output, int widt
         for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
                 uchar4 pixel = tex2D<uchar4>(tex, x + dx, y + dy);
-                float gray = (pixel.x + pixel.y + pixel.z) / 3.0f;
+                float gray = (0.299f * pixel.x +  0.587f * pixel.y + 0.114f * pixel.z);
                 
                 Gx += gray * Kx[dy+1][dx+1];
                 Gy += gray * Ky[dy+1][dx+1];
@@ -91,13 +91,12 @@ __global__ void prewittKernel(cudaTextureObject_t tex, uint8_t* output, int widt
 
         float magnitude = sqrtf(Gx * Gx + Gy * Gy);
         
-        uint8_t mag = static_cast<uint8_t>(fminf(255.0f, ceilf(magnitude)));
+        uint8_t mag = static_cast<uint8_t>(fminf(255.0f, magnitude));
 
         int out_idx = (y * width + x) * 4;
         output[out_idx] = mag;
         output[out_idx + 1] = mag;
         output[out_idx + 2] = mag;
-        output[out_idx + 3] = 0;
     }
 }
 
