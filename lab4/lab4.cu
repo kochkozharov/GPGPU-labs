@@ -32,42 +32,38 @@ struct AbsComparator {
     }
 };
 
-__global__ void swapRowsKernel(double* matrix, int n, int width, int row1, int row2) {
+__global__ void swapAndDivideKernel(double* matrix, int n, int width, int pivotRow, int swapRow, int startCol, double pivotVal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int totalThreads = gridDim.x * blockDim.x;
 
     for (int col = tid; col < width; col += totalThreads) {
-        int idx1 = col * n + row1;
-        int idx2 = col * n + row2;
-        double temp = matrix[idx1];
-        matrix[idx1] = matrix[idx2];
-        matrix[idx2] = temp;
-    }
-}
-
-__global__ void divideRowKernel(double* matrix, int n, int width, int pivotRow, int startCol, double pivotVal) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int totalThreads = gridDim.x * blockDim.x;
-
-    for (int col = startCol + tid; col < width; col += totalThreads) {
-        int idx = col * n + pivotRow;
-        matrix[idx] /= pivotVal;
+        int idx1 = col * n + pivotRow;
+        int idx2 = col * n + swapRow;
+        
+        if (pivotRow != swapRow) {
+            double temp = matrix[idx1];
+            matrix[idx1] = matrix[idx2];
+            matrix[idx2] = temp;
+        }
+        
+        if (col >= startCol) {
+            matrix[idx1] /= pivotVal;
+        }
     }
 }
 
 __global__ void eliminateKernel(double* matrix, int n, int width, int pivotRow, int pivotCol) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int colOffset = blockIdx.x * blockDim.x + threadIdx.x;
+    int rowOffset = blockIdx.x * blockDim.x + threadIdx.x;
+    int colOffset = blockIdx.y * blockDim.y + threadIdx.y;
     
-    int totalRowThreads = gridDim.y * blockDim.y;
-    int totalColThreads = gridDim.x * blockDim.x;
+    int totalRowThreads = gridDim.x * blockDim.x;
+    int totalColThreads = gridDim.y * blockDim.y;
 
-    for (int i = row; i < n; i += totalRowThreads) {
-        if (i == pivotRow) continue;
-        
-        double factor = matrix[pivotCol * n + i];
-        
-        for (int col = pivotCol + colOffset; col < width; col += totalColThreads) {
+    for (int col = pivotCol + 1 + colOffset; col < width; col += totalColThreads) {
+        for (int i = rowOffset; i < n; i += totalRowThreads) {
+            if (i == pivotRow) continue;
+            
+            double factor = matrix[pivotCol * n + i];
             int idx = col * n + i;
             int pivotIdx = col * n + pivotRow;
             matrix[idx] -= factor * matrix[pivotIdx];
@@ -76,14 +72,14 @@ __global__ void eliminateKernel(double* matrix, int n, int width, int pivotRow, 
 }
 
 __global__ void extractInverseKernel(const double* augmented, double* inverse, int n) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int rowOffset = blockIdx.x * blockDim.x + threadIdx.x;
+    int colOffset = blockIdx.y * blockDim.y + threadIdx.y;
     
-    int totalRowThreads = gridDim.y * blockDim.y;
-    int totalColThreads = gridDim.x * blockDim.x;
+    int totalRowThreads = gridDim.x * blockDim.x;
+    int totalColThreads = gridDim.y * blockDim.y;
 
-    for (int i = row; i < n; i += totalRowThreads) {
-        for (int j = col; j < n; j += totalColThreads) {
+    for (int j = colOffset; j < n; j += totalColThreads) {
+        for (int i = rowOffset; i < n; i += totalRowThreads) {
             inverse[j * n + i] = augmented[(n + j) * n + i];
         }
     }
@@ -149,17 +145,11 @@ int main() {
             return EXIT_FAILURE;
         }
 
-        if (maxIdx != k) {
-            swapRowsKernel<<<grid1D, block1D>>>(d_augmented, n, width, k, maxIdx);
-            CSC(cudaGetLastError());
-        }
-
-        divideRowKernel<<<grid1D, block1D>>>(d_augmented, n, width, k, k, pivotVal);
-        CSC(cudaGetLastError());
+        swapAndDivideKernel<<<grid1D, block1D>>>(d_augmented, n, width, k, maxIdx, k, pivotVal);
 
         eliminateKernel<<<grid2D, block2D>>>(d_augmented, n, width, k, k);
-        CSC(cudaGetLastError());
     }
+    CSC(cudaGetLastError());
 
     CSC(cudaDeviceSynchronize());
 
@@ -188,4 +178,3 @@ int main() {
 
     return 0;
 }
-
