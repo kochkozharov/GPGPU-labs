@@ -113,7 +113,8 @@ int main() {
     dim3 block(THREADS_NUM);
     dim3 grid(BLOCKS_NUM);
     
-    minDistanceKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
+    minDistanceDemoKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
+    //minDistanceKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
     CSC(cudaGetLastError());
     CSC(cudaDeviceSynchronize());
 

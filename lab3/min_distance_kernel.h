@@ -10,5 +10,7 @@ extern __constant__ int d_numClasses;
 
 __global__ void minDistanceKernel(const uchar4* input, uchar4* output, int totalPixels, int numClasses);
 
+__global__ void minDistanceDemoKernel(const uchar4* input, uchar4* output, int totalPixels, int numClasses);
+
 #endif // MIN_DISTANCE_KERNEL_H
 
