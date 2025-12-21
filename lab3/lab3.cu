@@ -6,6 +6,8 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include "image_utils.h"
+#include "min_distance_kernel.h"
 
 #define CSC(call)                                           \
 do {                                                        \
@@ -20,76 +22,6 @@ do {                                                        \
 constexpr int BLOCKS_NUM  = 128;
 constexpr int THREADS_NUM = 256;
 constexpr int MAX_CLASSES = 32;
-
-__constant__ float3 d_classAvg[MAX_CLASSES];
-__constant__ int d_numClasses;
-
-struct Image {
-    uint32_t width;
-    uint32_t height;
-    std::vector<uint8_t> data;
-};
-
-bool readImage(const std::string& path, Image& img) {
-    std::ifstream fin(path, std::ios::binary);
-    if (!fin) {
-        return false;
-    }
-    fin.read(reinterpret_cast<char*>(&img.width), sizeof(uint32_t));
-    fin.read(reinterpret_cast<char*>(&img.height), sizeof(uint32_t));
-    if (!fin) {
-        return false;
-    }
-    if (img.width == 0 || img.height == 0) {
-        return false;
-    }
-    size_t size = static_cast<size_t>(img.width) * img.height * 4;
-    img.data.resize(size);
-    fin.read(reinterpret_cast<char*>(img.data.data()), size);
-    return fin.gcount() == static_cast<std::streamsize>(size);
-}
-
-bool writeImage(const std::string& path, const Image& img) {
-    std::ofstream fout(path, std::ios::binary);
-    if (!fout) {
-        return false;
-    }
-    fout.write(reinterpret_cast<const char*>(&img.width), sizeof(uint32_t));
-    fout.write(reinterpret_cast<const char*>(&img.height), sizeof(uint32_t));
-    fout.write(reinterpret_cast<const char*>(img.data.data()), img.data.size());
-    return fout.good();
-}
-
-__global__ void minDistanceKernel(const uchar4* input, uchar4* output, int totalPixels, int numClasses) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int totalThreads = gridDim.x * blockDim.x;
-
-    for (int idx = tid; idx < totalPixels; idx += totalThreads) {
-        uchar4 pixel = input[idx];
-        float pr = static_cast<float>(pixel.x);
-        float pg = static_cast<float>(pixel.y);
-        float pb = static_cast<float>(pixel.z);
-
-        int bestClass = 0;
-        float maxScore = -1e30f;
-
-        for (int j = 0; j < numClasses; j++) {
-            float3 avg = d_classAvg[j];
-            
-            float dr = pr - avg.x;
-            float dg = pg - avg.y;
-            float db = pb - avg.z;
-            float score = -(dr * dr + dg * dg + db * db);
-
-            if (score > maxScore) {
-                maxScore = score;
-                bestClass = j;
-            }
-        }
-
-        output[idx] = make_uchar4(pixel.x, pixel.y, pixel.z, static_cast<uint8_t>(bestClass));
-    }
-}
 
 int main() {
     std::string inPath, outPath;
@@ -165,6 +97,7 @@ int main() {
         classAvg[j].z = static_cast<float>(sumB / npj);
     }
 
+    // Copy class averages to constant memory (defined in min_distance_kernel.cu)
     CSC(cudaMemcpyToSymbol(d_classAvg, classAvg.data(), nc * sizeof(float3)));
     CSC(cudaMemcpyToSymbol(d_numClasses, &nc, sizeof(int)));
 
@@ -180,7 +113,8 @@ int main() {
     dim3 block(THREADS_NUM);
     dim3 grid(BLOCKS_NUM);
     
-    minDistanceKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
+    minDistanceDemoKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
+    //minDistanceKernel<<<grid, block>>>(d_input, d_output, totalPixels, nc);
     CSC(cudaGetLastError());
     CSC(cudaDeviceSynchronize());
 
