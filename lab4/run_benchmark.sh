@@ -19,18 +19,25 @@ echo "=== CUDA Benchmark for Matrix Inversion ==="
 echo ""
 
 # Размеры матриц для тестирования
-SIZES=(10 100 1000)
+SIZES=(100 1000 2000)
 
 # Конфигурации grid/block для тестирования
-# Формат: block_size_x grid_size_x block_size_y grid_size_y
+# Формат: block_size_x block_size_y grid_size_x grid_size_y
 CONFIGS=(
-    "1 1 1 1"
-    "1 32 1 1"
     "8 8 8 8"
+    "8 8 16 16"
+    
+    "16 16 8 8"
     "16 16 16 16"
+    "16 16 32 32"
+    "16 32 16 16"
     "16 32 32 32"
+    
+    "32 32 16 16"
     "32 32 32 32"
+    "32 64 16 16"
     "32 64 32 32"
+    "64 64 16 16"
     "64 64 32 32"
 )
 
@@ -54,7 +61,7 @@ for SIZE in "${SIZES[@]}"; do
     
     # CUDA бенчмарки с различными конфигурациями
     for CONFIG in "${CONFIGS[@]}"; do
-        read -r BLOCK_SIZE_X GRID_SIZE_X BLOCK_SIZE_Y GRID_SIZE_Y <<< "$CONFIG"
+        read -r BLOCK_SIZE_X BLOCK_SIZE_Y GRID_SIZE_X GRID_SIZE_Y <<< "$CONFIG"
         
         # Проверяем, что конфигурация не превышает лимиты CUDA
         TOTAL_BLOCK=$((BLOCK_SIZE_X * BLOCK_SIZE_Y))
