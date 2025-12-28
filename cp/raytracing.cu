@@ -13,18 +13,13 @@
 #include <string>
 #include <chrono>
 #include <algorithm>
+#include <cuda_runtime.h>
 
 // ============================================================================
 // Математические структуры и утилиты
 // ============================================================================
-
-struct float3 {
-    float x, y, z;
-};
-
-__host__ __device__ inline float3 make_float3(float x, float y, float z) {
-    float3 v; v.x = x; v.y = y; v.z = z; return v;
-}
+// Используем встроенный float3 из CUDA (определен в vector_types.h)
+// Добавляем операторы и утилиты для работы с ним
 
 __host__ __device__ inline float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
@@ -364,37 +359,15 @@ __device__ __host__ bool rayFloorIntersect(
 // CUDA Kernel для рендеринга
 // ============================================================================
 
-__global__ void renderKernel(
-    unsigned char* output,
-    int width, int height,
-    float3 camPos, float3 camDir, float3 camUp, float3 camRight,
-    float fovRad,
+// Функция трассировки одного луча (device)
+__device__ float3 traceRay(
+    Ray ray,
     Triangle* triangles, int numTriangles,
     Body* bodies, int numBodies,
     Light* lights, int numLights,
     float floorZ, float floorMinX, float floorMaxX, float floorMinY, float floorMaxY,
-    float3 floorColor, float floorReflection,
-    unsigned long long* rayCounter
+    float3 floorColor
 ) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (x >= width || y >= height) return;
-    
-    // Подсчет лучей
-    atomicAdd(rayCounter, 1ULL);
-    
-    // Нормализованные экранные координаты
-    float aspect = (float)width / (float)height;
-    float scale = tanf(fovRad / 2.0f);
-    
-    float px = (2.0f * ((x + 0.5f) / width) - 1.0f) * aspect * scale;
-    float py = (1.0f - 2.0f * ((y + 0.5f) / height)) * scale;
-    
-    Ray ray;
-    ray.origin = camPos;
-    ray.direction = normalize(camDir + camRight * px + camUp * py);
-    
     float3 color = make_float3(0.0f, 0.0f, 0.0f);  // Черный фон
     float minT = 1e30f;
     int hitBody = -1;
@@ -422,7 +395,7 @@ __global__ void renderKernel(
     if (rayFloorIntersect(ray, floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY, floorT, floorHit)) {
         if (floorT < minT) {
             minT = floorT;
-            hitBody = -2;  // Специальный маркер для пола
+            hitBody = -2;
             hitNormal = make_float3(0.0f, 0.0f, 1.0f);
             hitPoint = floorHit;
             hitFloor = true;
@@ -431,14 +404,12 @@ __global__ void renderKernel(
     
     // Расчет освещения
     if (hitBody >= 0) {
-        // Попали в тело
         float3 bodyColor = bodies[hitBody].color;
         
         for (int i = 0; i < numLights; i++) {
             float3 lightDir = normalize(lights[i].position - hitPoint);
             float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
             
-            // Проверка тени (упрощенная)
             bool inShadow = false;
             Ray shadowRay;
             shadowRay.origin = hitPoint + hitNormal * 0.001f;
@@ -460,14 +431,11 @@ __global__ void renderKernel(
             }
         }
         
-        // Ambient освещение
         color.x += bodyColor.x * 0.1f;
         color.y += bodyColor.y * 0.1f;
         color.z += bodyColor.z * 0.1f;
         
     } else if (hitFloor) {
-        // Попали в пол
-        // Шахматный паттерн вместо текстуры (на оценку 3)
         int cx = (int)floorf(hitPoint.x);
         int cy = (int)floorf(hitPoint.y);
         float checker = ((cx + cy) & 1) ? 1.0f : 0.5f;
@@ -488,6 +456,70 @@ __global__ void renderKernel(
         color.z += baseColor.z * 0.1f;
     }
     
+    return color;
+}
+
+__global__ void renderKernel(
+    unsigned char* output,
+    int width, int height,
+    float3 camPos, float3 camDir, float3 camUp, float3 camRight,
+    float fovRad,
+    Triangle* triangles, int numTriangles,
+    Body* bodies, int numBodies,
+    Light* lights, int numLights,
+    float floorZ, float floorMinX, float floorMaxX, float floorMinY, float floorMaxY,
+    float3 floorColor, float floorReflection,
+    int ssaaSqrt,
+    unsigned long long* rayCounter
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= width || y >= height) return;
+    
+    float aspect = (float)width / (float)height;
+    float scale = tanf(fovRad / 2.0f);
+    
+    float3 color = make_float3(0.0f, 0.0f, 0.0f);
+    int numSamples = ssaaSqrt * ssaaSqrt;
+    
+    // SSAA: выпускаем ssaaSqrt x ssaaSqrt лучей на пиксель
+    for (int sy = 0; sy < ssaaSqrt; sy++) {
+        for (int sx = 0; sx < ssaaSqrt; sx++) {
+            // Подсчет лучей
+            atomicAdd(rayCounter, 1ULL);
+            
+            // Субпиксельное смещение
+            float subX = (sx + 0.5f) / ssaaSqrt;
+            float subY = (sy + 0.5f) / ssaaSqrt;
+            
+            float px = (2.0f * ((x + subX) / width) - 1.0f) * aspect * scale;
+            float py = (1.0f - 2.0f * ((y + subY) / height)) * scale;
+            
+            Ray ray;
+            ray.origin = camPos;
+            ray.direction = normalize(camDir + camRight * px + camUp * py);
+            
+            float3 sampleColor = traceRay(
+                ray,
+                triangles, numTriangles,
+                bodies, numBodies,
+                lights, numLights,
+                floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY,
+                floorColor
+            );
+            
+            color.x += sampleColor.x;
+            color.y += sampleColor.y;
+            color.z += sampleColor.z;
+        }
+    }
+    
+    // Усреднение
+    color.x /= numSamples;
+    color.y /= numSamples;
+    color.z /= numSamples;
+    
     // Clamp и запись в буфер
     color.x = fminf(1.0f, fmaxf(0.0f, color.x));
     color.y = fminf(1.0f, fmaxf(0.0f, color.y));
@@ -497,12 +529,109 @@ __global__ void renderKernel(
     output[idx + 0] = (unsigned char)(color.x * 255.0f);
     output[idx + 1] = (unsigned char)(color.y * 255.0f);
     output[idx + 2] = (unsigned char)(color.z * 255.0f);
-    output[idx + 3] = 0;  // Alpha
+    output[idx + 3] = 255;  // Alpha (fully opaque)
 }
 
 // ============================================================================
 // CPU версия рендеринга
 // ============================================================================
+
+// CPU версия трассировки луча
+float3 traceRayCPU(
+    Ray ray,
+    Triangle* triangles, int numTriangles,
+    Body* bodies, int numBodies,
+    Light* lights, int numLights,
+    float floorZ, float floorMinX, float floorMaxX, float floorMinY, float floorMaxY,
+    float3 floorColor
+) {
+    float3 color = make_float3(0.0f, 0.0f, 0.0f);
+    float minT = 1e30f;
+    int hitBody = -1;
+    float3 hitNormal;
+    float3 hitPoint;
+    bool hitFloor = false;
+    
+    for (int i = 0; i < numTriangles; i++) {
+        float t;
+        float3 normal;
+        if (rayTriangleIntersect(ray, triangles[i], t, normal)) {
+            if (t < minT) {
+                minT = t;
+                hitBody = triangles[i].bodyIndex;
+                hitNormal = normal;
+                hitPoint = ray.origin + ray.direction * t;
+            }
+        }
+    }
+    
+    float floorT;
+    float3 floorHit;
+    if (rayFloorIntersect(ray, floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY, floorT, floorHit)) {
+        if (floorT < minT) {
+            minT = floorT;
+            hitBody = -2;
+            hitNormal = make_float3(0.0f, 0.0f, 1.0f);
+            hitPoint = floorHit;
+            hitFloor = true;
+        }
+    }
+    
+    if (hitBody >= 0) {
+        float3 bodyColor = bodies[hitBody].color;
+        
+        for (int i = 0; i < numLights; i++) {
+            float3 lightDir = normalize(lights[i].position - hitPoint);
+            float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
+            
+            bool inShadow = false;
+            Ray shadowRay;
+            shadowRay.origin = hitPoint + hitNormal * 0.001f;
+            shadowRay.direction = lightDir;
+            float lightDist = length(lights[i].position - hitPoint);
+            
+            for (int j = 0; j < numTriangles && !inShadow; j++) {
+                float t;
+                float3 n;
+                if (rayTriangleIntersect(shadowRay, triangles[j], t, n) && t < lightDist) {
+                    inShadow = true;
+                }
+            }
+            
+            if (!inShadow) {
+                color.x += bodyColor.x * lights[i].color.x * diff;
+                color.y += bodyColor.y * lights[i].color.y * diff;
+                color.z += bodyColor.z * lights[i].color.z * diff;
+            }
+        }
+        
+        color.x += bodyColor.x * 0.1f;
+        color.y += bodyColor.y * 0.1f;
+        color.z += bodyColor.z * 0.1f;
+        
+    } else if (hitFloor) {
+        int cx = (int)floorf(hitPoint.x);
+        int cy = (int)floorf(hitPoint.y);
+        float checker = ((cx + cy) & 1) ? 1.0f : 0.5f;
+        
+        float3 baseColor = floorColor * checker;
+        
+        for (int i = 0; i < numLights; i++) {
+            float3 lightDir = normalize(lights[i].position - hitPoint);
+            float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
+            
+            color.x += baseColor.x * lights[i].color.x * diff;
+            color.y += baseColor.y * lights[i].color.y * diff;
+            color.z += baseColor.z * lights[i].color.z * diff;
+        }
+        
+        color.x += baseColor.x * 0.1f;
+        color.y += baseColor.y * 0.1f;
+        color.z += baseColor.z * 0.1f;
+    }
+    
+    return color;
+}
 
 void renderCPU(
     unsigned char* output,
@@ -514,106 +643,51 @@ void renderCPU(
     Light* lights, int numLights,
     float floorZ, float floorMinX, float floorMaxX, float floorMinY, float floorMaxY,
     float3 floorColor, float floorReflection,
+    int ssaaSqrt,
     unsigned long long& rayCount
 ) {
     float aspect = (float)width / (float)height;
     float scale = tanf(fovRad / 2.0f);
+    int numSamples = ssaaSqrt * ssaaSqrt;
     
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            rayCount++;
-            
-            float px = (2.0f * ((x + 0.5f) / width) - 1.0f) * aspect * scale;
-            float py = (1.0f - 2.0f * ((y + 0.5f) / height)) * scale;
-            
-            Ray ray;
-            ray.origin = camPos;
-            ray.direction = normalize(camDir + camRight * px + camUp * py);
-            
             float3 color = make_float3(0.0f, 0.0f, 0.0f);
-            float minT = 1e30f;
-            int hitBody = -1;
-            float3 hitNormal;
-            float3 hitPoint;
-            bool hitFloor = false;
             
-            for (int i = 0; i < numTriangles; i++) {
-                float t;
-                float3 normal;
-                if (rayTriangleIntersect(ray, triangles[i], t, normal)) {
-                    if (t < minT) {
-                        minT = t;
-                        hitBody = triangles[i].bodyIndex;
-                        hitNormal = normal;
-                        hitPoint = ray.origin + ray.direction * t;
-                    }
+            // SSAA: выпускаем ssaaSqrt x ssaaSqrt лучей на пиксель
+            for (int sy = 0; sy < ssaaSqrt; sy++) {
+                for (int sx = 0; sx < ssaaSqrt; sx++) {
+                    rayCount++;
+                    
+                    float subX = (sx + 0.5f) / ssaaSqrt;
+                    float subY = (sy + 0.5f) / ssaaSqrt;
+                    
+                    float px = (2.0f * ((x + subX) / width) - 1.0f) * aspect * scale;
+                    float py = (1.0f - 2.0f * ((y + subY) / height)) * scale;
+                    
+                    Ray ray;
+                    ray.origin = camPos;
+                    ray.direction = normalize(camDir + camRight * px + camUp * py);
+                    
+                    float3 sampleColor = traceRayCPU(
+                        ray,
+                        triangles, numTriangles,
+                        bodies, numBodies,
+                        lights, numLights,
+                        floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY,
+                        floorColor
+                    );
+                    
+                    color.x += sampleColor.x;
+                    color.y += sampleColor.y;
+                    color.z += sampleColor.z;
                 }
             }
             
-            float floorT;
-            float3 floorHit;
-            if (rayFloorIntersect(ray, floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY, floorT, floorHit)) {
-                if (floorT < minT) {
-                    minT = floorT;
-                    hitBody = -2;
-                    hitNormal = make_float3(0.0f, 0.0f, 1.0f);
-                    hitPoint = floorHit;
-                    hitFloor = true;
-                }
-            }
-            
-            if (hitBody >= 0) {
-                float3 bodyColor = bodies[hitBody].color;
-                
-                for (int i = 0; i < numLights; i++) {
-                    float3 lightDir = normalize(lights[i].position - hitPoint);
-                    float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
-                    
-                    bool inShadow = false;
-                    Ray shadowRay;
-                    shadowRay.origin = hitPoint + hitNormal * 0.001f;
-                    shadowRay.direction = lightDir;
-                    float lightDist = length(lights[i].position - hitPoint);
-                    
-                    for (int j = 0; j < numTriangles && !inShadow; j++) {
-                        float t;
-                        float3 n;
-                        if (rayTriangleIntersect(shadowRay, triangles[j], t, n) && t < lightDist) {
-                            inShadow = true;
-                        }
-                    }
-                    
-                    if (!inShadow) {
-                        color.x += bodyColor.x * lights[i].color.x * diff;
-                        color.y += bodyColor.y * lights[i].color.y * diff;
-                        color.z += bodyColor.z * lights[i].color.z * diff;
-                    }
-                }
-                
-                color.x += bodyColor.x * 0.1f;
-                color.y += bodyColor.y * 0.1f;
-                color.z += bodyColor.z * 0.1f;
-                
-            } else if (hitFloor) {
-                int cx = (int)floorf(hitPoint.x);
-                int cy = (int)floorf(hitPoint.y);
-                float checker = ((cx + cy) & 1) ? 1.0f : 0.5f;
-                
-                float3 baseColor = floorColor * checker;
-                
-                for (int i = 0; i < numLights; i++) {
-                    float3 lightDir = normalize(lights[i].position - hitPoint);
-                    float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
-                    
-                    color.x += baseColor.x * lights[i].color.x * diff;
-                    color.y += baseColor.y * lights[i].color.y * diff;
-                    color.z += baseColor.z * lights[i].color.z * diff;
-                }
-                
-                color.x += baseColor.x * 0.1f;
-                color.y += baseColor.y * 0.1f;
-                color.z += baseColor.z * 0.1f;
-            }
+            // Усреднение
+            color.x /= numSamples;
+            color.y /= numSamples;
+            color.z /= numSamples;
             
             color.x = fminf(1.0f, fmaxf(0.0f, color.x));
             color.y = fminf(1.0f, fmaxf(0.0f, color.y));
@@ -623,7 +697,7 @@ void renderCPU(
             output[idx + 0] = (unsigned char)(color.x * 255.0f);
             output[idx + 1] = (unsigned char)(color.y * 255.0f);
             output[idx + 2] = (unsigned char)(color.z * 255.0f);
-            output[idx + 3] = 0;
+            output[idx + 3] = 255;
         }
     }
 }
@@ -650,23 +724,23 @@ bool writeImage(const std::string& path, int width, int height, const unsigned c
 void printDefaultConfig() {
     printf("120\n");                                // количество кадров
     printf("./output/frame_%%d.data\n");            // путь к изображениям
-    printf("640 480 90\n");                         // разрешение и FOV
+    printf("1280 720 90\n");                        // разрешение и FOV (HD для красивого результата)
     // Параметры камеры
-    printf("6.0 2.0 0.0 1.5 0.8 1.0 2.0 0.5 0.0 0.0\n");  // r_c0, z_c0, phi_c0, A_c_r, A_c_z, omega_c_r, omega_c_z, omega_c_phi, p_c_r, p_c_z
-    printf("1.0 0.5 0.0 0.3 0.2 0.5 1.0 0.5 0.0 0.0\n");  // r_n0, z_n0, phi_n0, A_n_r, A_n_z, omega_n_r, omega_n_z, omega_n_phi, p_n_r, p_n_z
+    printf("8.0 3.0 0.0 2.0 1.5 1.0 3.0 1.0 0.0 0.0\n");  // r_c0, z_c0, phi_c0, A_c_r, A_c_z, omega_c_r, omega_c_z, omega_c_phi, p_c_r, p_c_z
+    printf("0.5 0.5 0.0 0.2 0.3 0.5 1.5 1.0 0.0 0.0\n");  // r_n0, z_n0, phi_n0, A_n_r, A_n_z, omega_n_r, omega_n_z, omega_n_phi, p_n_r, p_n_z
     // Тетраэдр: центр, цвет, радиус, reflection, transparency, edge lights
-    printf("2.0 0.0 0.5 1.0 0.2 0.2 0.8 0.0 0.0 0\n");
+    printf("2.5 0.0 1.0 1.0 0.3 0.3 1.0 0.0 0.0 0\n");
     // Гексаэдр
-    printf("-1.0 2.0 0.5 0.2 1.0 0.2 0.8 0.0 0.0 0\n");
+    printf("-2.0 2.5 0.8 0.3 1.0 0.3 0.9 0.0 0.0 0\n");
     // Икосаэдр
-    printf("-1.0 -2.0 0.5 0.2 0.2 1.0 0.8 0.0 0.0 0\n");
+    printf("0.0 -2.5 1.2 0.3 0.3 1.0 1.1 0.0 0.0 0\n");
     // Пол: 4 точки, текстура (не используется), оттенок, reflection
-    printf("-5.0 -5.0 -0.5 -5.0 5.0 -0.5 5.0 5.0 -0.5 5.0 -5.0 -0.5 none 0.8 0.8 0.8 0.0\n");
+    printf("-8.0 -8.0 -0.5 -8.0 8.0 -0.5 8.0 8.0 -0.5 8.0 -8.0 -0.5 none 0.9 0.9 0.9 0.0\n");
     // Источники света
     printf("1\n");
-    printf("0.0 0.0 10.0 1.0 1.0 1.0\n");
-    // Глубина рекурсии и SSAA (не используется на 3)
-    printf("1 1\n");
+    printf("0.0 0.0 15.0 1.0 1.0 1.0\n");
+    // Глубина рекурсии и SSAA (4x4 = 16 лучей на пиксель для сглаживания)
+    printf("1 4\n");
 }
 
 // ============================================================================
@@ -882,6 +956,7 @@ int main(int argc, char** argv) {
                 devLights, numLights,
                 floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY,
                 floorColor, floorReflection,
+                ssaaSqrt,
                 devRayCounter
             );
             
@@ -930,6 +1005,7 @@ int main(int argc, char** argv) {
                 lights.data(), numLights,
                 floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY,
                 floorColor, floorReflection,
+                ssaaSqrt,
                 rayCount
             );
             
