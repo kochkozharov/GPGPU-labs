@@ -1,13 +1,6 @@
 # Image Converter
 
-Конвертер между кастомным бинарным форматом изображений и PNG.
-
-## Формат бинарного файла
-
-- Первые 4 байта: ширина изображения (int, little-endian)
-- Следующие 4 байта: высота изображения (int, little-endian)
-- Далее построчно данные пикселей
-- Каждый пиксель занимает 4 байта в формате RGBA (R, G, B, A)
+Конвертер между бинарным форматом изображений (используемым в лабораторных работах по GPGPU) и стандартными форматами (PNG, MP4).
 
 ## Установка
 
@@ -16,36 +9,79 @@ cd converter
 uv sync
 ```
 
+Или с pip:
+
+```bash
+pip install -e .
+```
+
+## Формат бинарных изображений
+
+Бинарный формат `.data`:
+- Первые 4 байта: ширина (int32, little-endian)
+- Следующие 4 байта: высота (int32, little-endian)
+- Остальные байты: пиксели построчно, каждый пиксель — 4 байта (R, G, B, A)
+
 ## Использование
 
-### Конвертация из бинарного формата в PNG
+### Конвертация изображений
 
 ```bash
-uv run image-converter to-png input.data output.png
+# Бинарный формат -> PNG
+image-converter to-png input.data output.png
+
+# PNG -> бинарный формат
+image-converter to-binary input.png output.data
+
+# С игнорированием alpha-канала (устанавливается в 255)
+image-converter to-png input.data output.png --ignore-alpha
+image-converter to-binary input.png output.data --ignore-alpha
 ```
 
-### Конвертация из PNG в бинарный формат
+### Создание видео из кадров
 
 ```bash
-uv run image-converter to-binary input.png output.data
+# Из последовательности кадров (с паттерном %d)
+image-converter to-video "frames/frame_%d.data" output.mp4 --fps 30
+
+# Из всех .data файлов в директории
+image-converter to-video-dir ./frames output.mp4 --fps 30
 ```
 
-### Игнорирование альфа-канала
+#### Опции для видео
 
-Флаг `--ignore-alpha` устанавливает альфа-канал в максимальное значение (полная непрозрачность) для всех пикселей:
+- `--fps N` — частота кадров (по умолчанию: 30)
+- `--start-frame N` — начальный номер кадра (по умолчанию: 0)
+- `--end-frame N` — конечный номер кадра (по умолчанию: автоопределение)
+- `--codec CODEC` — видеокодек (по умолчанию: libx264)
+- `--crf N` — качество видео, 0-51, меньше = лучше (по умолчанию: 23)
+- `--pattern GLOB` — шаблон для поиска файлов в директории (по умолчанию: *.data)
+- `--no-ignore-alpha` — сохранить оригинальный alpha-канал
+
+### Требования для создания видео
+
+Для создания видео требуется установленный **ffmpeg**:
 
 ```bash
-uv run image-converter to-png input.data output.png --ignore-alpha
-uv run image-converter to-binary input.png output.data --ignore-alpha
+# macOS
+brew install ffmpeg
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# Arch Linux
+sudo pacman -S ffmpeg
 ```
 
 ## Примеры
 
 ```bash
-# Базовое использование
-uv run image-converter to-png lab3/input/09.data output.png
-uv run image-converter to-binary output.png converted_back.data
+# Конвертировать результаты ray tracing в видео
+image-converter to-video "./output/frame_%d.data" animation.mp4 --fps 24
 
-# С игнорированием альфа-канала
-uv run image-converter to-png lab3/input/09.data output.png --ignore-alpha
+# Высокое качество видео
+image-converter to-video "./output/frame_%d.data" animation_hq.mp4 --fps 30 --crf 18
+
+# Из директории с произвольными именами файлов
+image-converter to-video-dir ./rendered_frames result.mp4 --pattern "*.data" --fps 60
 ```

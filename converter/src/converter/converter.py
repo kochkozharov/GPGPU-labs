@@ -1,8 +1,11 @@
 """Core conversion functions for binary image format and PNG."""
 
 import struct
+import subprocess
+import tempfile
+import shutil
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 from PIL import Image
 import numpy as np
@@ -136,3 +139,170 @@ def png_to_binary(png_path: Path, binary_path: Path, ignore_alpha: bool = False)
     # Write to binary format
     write_binary_image(binary_path, image_array)
 
+
+def frames_to_video(
+    frame_pattern: str,
+    output_path: Path,
+    fps: int = 30,
+    ignore_alpha: bool = True,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
+    codec: str = 'libx264',
+    crf: int = 23
+) -> None:
+    """
+    Convert a sequence of binary image frames to an MP4 video.
+    
+    Args:
+        frame_pattern: Pattern for frame files with %d placeholder (e.g., "frame_%d.data")
+        output_path: Path where to save the MP4 video
+        fps: Frames per second for the output video
+        ignore_alpha: If True, set alpha channel to maximum (fully opaque) for all frames
+        start_frame: First frame number to include
+        end_frame: Last frame number to include (exclusive). If None, auto-detect.
+        codec: Video codec to use (default: libx264)
+        crf: Constant Rate Factor for quality (0-51, lower = better quality, default: 23)
+    """
+    # Check if ffmpeg is available
+    if shutil.which('ffmpeg') is None:
+        raise RuntimeError("ffmpeg is required but not found in PATH. Please install ffmpeg.")
+    
+    # Create a temporary directory for PNG frames
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        
+        # Detect frames if end_frame not specified
+        if end_frame is None:
+            frame_num = start_frame
+            while True:
+                frame_file = Path(frame_pattern % frame_num)
+                if not frame_file.exists():
+                    break
+                frame_num += 1
+            end_frame = frame_num
+        
+        if end_frame <= start_frame:
+            raise ValueError(f"No frames found matching pattern: {frame_pattern}")
+        
+        print(f"Converting {end_frame - start_frame} frames to PNG...")
+        
+        # Convert each binary frame to PNG
+        for i, frame_num in enumerate(range(start_frame, end_frame)):
+            binary_path = Path(frame_pattern % frame_num)
+            if not binary_path.exists():
+                raise FileNotFoundError(f"Frame not found: {binary_path}")
+            
+            # Use sequential numbering for ffmpeg
+            png_path = temp_path / f"frame_{i:06d}.png"
+            binary_to_png(binary_path, png_path, ignore_alpha=ignore_alpha)
+            
+            # Progress indicator
+            if (i + 1) % 10 == 0 or i == end_frame - start_frame - 1:
+                print(f"  Converted {i + 1}/{end_frame - start_frame} frames")
+        
+        print(f"Encoding video with ffmpeg...")
+        
+        # Create output directory if needed
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build ffmpeg command
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file
+            '-framerate', str(fps),
+            '-i', str(temp_path / 'frame_%06d.png'),
+            '-c:v', codec,
+            '-crf', str(crf),
+            '-pix_fmt', 'yuv420p',  # Compatibility with most players
+            '-movflags', '+faststart',  # Enable streaming
+            str(output_path)
+        ]
+        
+        # Run ffmpeg
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr}")
+        
+        print(f"Video saved to: {output_path}")
+
+
+def video_from_directory(
+    input_dir: Path,
+    output_path: Path,
+    pattern: str = "*.data",
+    fps: int = 30,
+    ignore_alpha: bool = True,
+    codec: str = 'libx264',
+    crf: int = 23
+) -> None:
+    """
+    Convert all binary image files in a directory to an MP4 video.
+    
+    Files are sorted alphabetically before combining.
+    
+    Args:
+        input_dir: Directory containing binary image files
+        output_path: Path where to save the MP4 video
+        pattern: Glob pattern for frame files (default: "*.data")
+        fps: Frames per second for the output video
+        ignore_alpha: If True, set alpha channel to maximum for all frames
+        codec: Video codec to use
+        crf: Constant Rate Factor for quality
+    """
+    # Check if ffmpeg is available
+    if shutil.which('ffmpeg') is None:
+        raise RuntimeError("ffmpeg is required but not found in PATH. Please install ffmpeg.")
+    
+    # Find all matching files
+    import glob
+    frame_files = sorted(glob.glob(str(input_dir / pattern)))
+    
+    if not frame_files:
+        raise ValueError(f"No files found matching pattern '{pattern}' in {input_dir}")
+    
+    # Create a temporary directory for PNG frames
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        
+        print(f"Converting {len(frame_files)} frames to PNG...")
+        
+        # Convert each binary frame to PNG
+        for i, binary_file in enumerate(frame_files):
+            binary_path = Path(binary_file)
+            png_path = temp_path / f"frame_{i:06d}.png"
+            binary_to_png(binary_path, png_path, ignore_alpha=ignore_alpha)
+            
+            if (i + 1) % 10 == 0 or i == len(frame_files) - 1:
+                print(f"  Converted {i + 1}/{len(frame_files)} frames")
+        
+        print(f"Encoding video with ffmpeg...")
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-y',
+            '-framerate', str(fps),
+            '-i', str(temp_path / 'frame_%06d.png'),
+            '-c:v', codec,
+            '-crf', str(crf),
+            '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',
+            str(output_path)
+        ]
+        
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr}")
+        
+        print(f"Video saved to: {output_path}")
