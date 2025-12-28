@@ -188,7 +188,7 @@ __host__ void generateIcosahedron(float3 center, float radius, float3* vertices)
 // Генерация треугольников
 // ============================================================================
 
-__host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex) {
+__host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
     // 4 грани тетраэдра
     int faces[4][3] = {
         {0, 1, 2},
@@ -203,13 +203,22 @@ __host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles,
         triangles[i].v2 = vertices[faces[i][2]];
         float3 edge1 = triangles[i].v1 - triangles[i].v0;
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
-        triangles[i].normal = normalize(cross(edge1, edge2));
+        float3 normal = normalize(cross(edge1, edge2));
+        
+        // Проверяем, направлена ли нормаль наружу от центра
+        float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
+        float3 outward = faceCenter - center;
+        if (dot(normal, outward) < 0) {
+            normal = normal * (-1.0f);  // Инвертируем нормаль
+        }
+        
+        triangles[i].normal = normal;
         triangles[i].bodyIndex = bodyIndex;
     }
     return 4;
 }
 
-__host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex) {
+__host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
     // 6 граней, каждая из 2 треугольников
     int faces[12][3] = {
         // Нижняя грань (z = -a)
@@ -232,13 +241,22 @@ __host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, 
         triangles[i].v2 = vertices[faces[i][2]];
         float3 edge1 = triangles[i].v1 - triangles[i].v0;
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
-        triangles[i].normal = normalize(cross(edge1, edge2));
+        float3 normal = normalize(cross(edge1, edge2));
+        
+        // Проверяем, направлена ли нормаль наружу от центра
+        float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
+        float3 outward = faceCenter - center;
+        if (dot(normal, outward) < 0) {
+            normal = normal * (-1.0f);  // Инвертируем нормаль
+        }
+        
+        triangles[i].normal = normal;
         triangles[i].bodyIndex = bodyIndex;
     }
     return 12;
 }
 
-__host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex) {
+__host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
     // 20 граней икосаэдра
     int faces[20][3] = {
         {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11},
@@ -253,7 +271,16 @@ __host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles,
         triangles[i].v2 = vertices[faces[i][2]];
         float3 edge1 = triangles[i].v1 - triangles[i].v0;
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
-        triangles[i].normal = normalize(cross(edge1, edge2));
+        float3 normal = normalize(cross(edge1, edge2));
+        
+        // Проверяем, направлена ли нормаль наружу от центра
+        float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
+        float3 outward = faceCenter - center;
+        if (dot(normal, outward) < 0) {
+            normal = normal * (-1.0f);  // Инвертируем нормаль
+        }
+        
+        triangles[i].normal = normal;
         triangles[i].bodyIndex = bodyIndex;
     }
     return 20;
@@ -446,9 +473,26 @@ __device__ float3 traceRay(
             float3 lightDir = normalize(lights[i].position - hitPoint);
             float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
             
-            color.x += baseColor.x * lights[i].color.x * diff;
-            color.y += baseColor.y * lights[i].color.y * diff;
-            color.z += baseColor.z * lights[i].color.z * diff;
+            // Проверка тени на полу от объектов
+            bool inShadow = false;
+            Ray shadowRay;
+            shadowRay.origin = hitPoint + hitNormal * 0.001f;
+            shadowRay.direction = lightDir;
+            float lightDist = length(lights[i].position - hitPoint);
+            
+            for (int j = 0; j < numTriangles && !inShadow; j++) {
+                float t;
+                float3 n;
+                if (rayTriangleIntersect(shadowRay, triangles[j], t, n) && t < lightDist) {
+                    inShadow = true;
+                }
+            }
+            
+            if (!inShadow) {
+                color.x += baseColor.x * lights[i].color.x * diff;
+                color.y += baseColor.y * lights[i].color.y * diff;
+                color.z += baseColor.z * lights[i].color.z * diff;
+            }
         }
         
         color.x += baseColor.x * 0.1f;
@@ -620,9 +664,26 @@ float3 traceRayCPU(
             float3 lightDir = normalize(lights[i].position - hitPoint);
             float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
             
-            color.x += baseColor.x * lights[i].color.x * diff;
-            color.y += baseColor.y * lights[i].color.y * diff;
-            color.z += baseColor.z * lights[i].color.z * diff;
+            // Проверка тени на полу от объектов
+            bool inShadow = false;
+            Ray shadowRay;
+            shadowRay.origin = hitPoint + hitNormal * 0.001f;
+            shadowRay.direction = lightDir;
+            float lightDist = length(lights[i].position - hitPoint);
+            
+            for (int j = 0; j < numTriangles && !inShadow; j++) {
+                float t;
+                float3 n;
+                if (rayTriangleIntersect(shadowRay, triangles[j], t, n) && t < lightDist) {
+                    inShadow = true;
+                }
+            }
+            
+            if (!inShadow) {
+                color.x += baseColor.x * lights[i].color.x * diff;
+                color.y += baseColor.y * lights[i].color.y * diff;
+                color.z += baseColor.z * lights[i].color.z * diff;
+            }
         }
         
         color.x += baseColor.x * 0.1f;
@@ -885,7 +946,7 @@ int main(int argc, char** argv) {
         float3 vertices[TETRAHEDRON_VERTICES];
         Triangle tris[TETRAHEDRON_FACES];
         generateTetrahedron(bodies[0].center, bodies[0].radius, vertices);
-        int n = generateTetrahedronTriangles(vertices, tris, 0);
+        int n = generateTetrahedronTriangles(vertices, tris, 0, bodies[0].center);
         for (int i = 0; i < n; i++) allTriangles.push_back(tris[i]);
     }
     
@@ -894,7 +955,7 @@ int main(int argc, char** argv) {
         float3 vertices[HEXAHEDRON_VERTICES];
         Triangle tris[HEXAHEDRON_TRIANGLES];
         generateHexahedron(bodies[1].center, bodies[1].radius, vertices);
-        int n = generateHexahedronTriangles(vertices, tris, 1);
+        int n = generateHexahedronTriangles(vertices, tris, 1, bodies[1].center);
         for (int i = 0; i < n; i++) allTriangles.push_back(tris[i]);
     }
     
@@ -903,7 +964,7 @@ int main(int argc, char** argv) {
         float3 vertices[ICOSAHEDRON_VERTICES];
         Triangle tris[ICOSAHEDRON_FACES];
         generateIcosahedron(bodies[2].center, bodies[2].radius, vertices);
-        int n = generateIcosahedronTriangles(vertices, tris, 2);
+        int n = generateIcosahedronTriangles(vertices, tris, 2, bodies[2].center);
         for (int i = 0; i < n; i++) allTriangles.push_back(tris[i]);
     }
     
