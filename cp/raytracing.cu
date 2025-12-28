@@ -1,9 +1,3 @@
-/**
- * Ray Tracing на GPU (CUDA)
- * Вариант 3: Тетраэдр, Гексаэдр, Икосаэдр
- * На оценку 3: без рекурсии, без текстур, без отражений, один источник света
- */
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,12 +8,6 @@
 #include <chrono>
 #include <algorithm>
 #include <cuda_runtime.h>
-
-// ============================================================================
-// Математические структуры и утилиты
-// ============================================================================
-// Используем встроенный float3 из CUDA (определен в vector_types.h)
-// Добавляем операторы и утилиты для работы с ним
 
 __host__ __device__ inline float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
@@ -63,9 +51,6 @@ __host__ __device__ inline float3 normalize(const float3& v) {
     return make_float3(0.0f, 0.0f, 0.0f);
 }
 
-// ============================================================================
-// Структуры данных
-// ============================================================================
 
 struct Ray {
     float3 origin;
@@ -75,16 +60,16 @@ struct Ray {
 struct Triangle {
     float3 v0, v1, v2;
     float3 normal;
-    int bodyIndex;  // к какому телу принадлежит
+    int bodyIndex;
 };
 
 struct Body {
     float3 center;
-    float3 color;      // нормированный цвет
-    float radius;      // радиус описанной сферы
-    float reflection;  // коэффициент отражения (не используется на 3)
-    float transparency;// коэффициент прозрачности (не используется на 3)
-    int edgeLights;    // источники на ребре (не используется на 3)
+    float3 color;
+    float radius;
+    float reflection;
+    float transparency;
+    int edgeLights;
 };
 
 struct Light {
@@ -99,10 +84,6 @@ struct Camera {
     float3 right;
 };
 
-// ============================================================================
-// Параметры камеры (цилиндрические координаты)
-// ============================================================================
-
 struct CameraParams {
     float r_c0, z_c0, phi_c0;
     float A_c_r, A_c_z;
@@ -115,31 +96,19 @@ struct CameraParams {
     float p_n_r, p_n_z;
 };
 
-// ============================================================================
-// Глобальные константы для многогранников
-// ============================================================================
-
-// Тетраэдр: 4 вершины, 4 грани
 #define TETRAHEDRON_VERTICES 4
 #define TETRAHEDRON_FACES 4
 
-// Гексаэдр (куб): 8 вершин, 6 граней (по 2 треугольника = 12 треугольников)
 #define HEXAHEDRON_VERTICES 8
 #define HEXAHEDRON_TRIANGLES 12
 
-// Икосаэдр: 12 вершин, 20 граней
 #define ICOSAHEDRON_VERTICES 12
 #define ICOSAHEDRON_FACES 20
 
-// Максимум треугольников для одного тела
 #define MAX_TRIANGLES_PER_BODY 20
 
-// ============================================================================
-// Генерация вершин платоновых тел
-// ============================================================================
 
 __host__ void generateTetrahedron(float3 center, float radius, float3* vertices) {
-    // Вершины правильного тетраэдра, вписанного в сферу радиуса radius
     float a = radius / sqrtf(3.0f);
     
     vertices[0] = make_float3(center.x + a, center.y + a, center.z + a);
@@ -149,7 +118,6 @@ __host__ void generateTetrahedron(float3 center, float radius, float3* vertices)
 }
 
 __host__ void generateHexahedron(float3 center, float radius, float3* vertices) {
-    // Куб, вписанный в сферу радиуса radius
     float a = radius / sqrtf(3.0f);
     
     vertices[0] = make_float3(center.x - a, center.y - a, center.z - a);
@@ -163,11 +131,9 @@ __host__ void generateHexahedron(float3 center, float radius, float3* vertices) 
 }
 
 __host__ void generateIcosahedron(float3 center, float radius, float3* vertices) {
-    // Икосаэдр, вписанный в сферу радиуса radius
-    float phi = (1.0f + sqrtf(5.0f)) / 2.0f;  // золотое сечение
+    float phi = (1.0f + sqrtf(5.0f)) / 2.0f;
     float scale = radius / sqrtf(1.0f + phi * phi);
     
-    // 12 вершин
     vertices[0]  = make_float3(center.x - scale, center.y + phi * scale, center.z);
     vertices[1]  = make_float3(center.x + scale, center.y + phi * scale, center.z);
     vertices[2]  = make_float3(center.x - scale, center.y - phi * scale, center.z);
@@ -184,12 +150,7 @@ __host__ void generateIcosahedron(float3 center, float radius, float3* vertices)
     vertices[11] = make_float3(center.x - phi * scale, center.y, center.z + scale);
 }
 
-// ============================================================================
-// Генерация треугольников
-// ============================================================================
-
 __host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
-    // 4 грани тетраэдра
     int faces[4][3] = {
         {0, 1, 2},
         {0, 1, 3},
@@ -205,11 +166,10 @@ __host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles,
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
         float3 normal = normalize(cross(edge1, edge2));
         
-        // Проверяем, направлена ли нормаль наружу от центра
         float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
         float3 outward = faceCenter - center;
         if (dot(normal, outward) < 0) {
-            normal = normal * (-1.0f);  // Инвертируем нормаль
+            normal = normal * (-1.0f);
         }
         
         triangles[i].normal = normal;
@@ -219,19 +179,12 @@ __host__ int generateTetrahedronTriangles(float3* vertices, Triangle* triangles,
 }
 
 __host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
-    // 6 граней, каждая из 2 треугольников
     int faces[12][3] = {
-        // Нижняя грань (z = -a)
         {0, 1, 2}, {0, 2, 3},
-        // Верхняя грань (z = +a)
         {4, 6, 5}, {4, 7, 6},
-        // Передняя грань (y = -a)
         {0, 5, 1}, {0, 4, 5},
-        // Задняя грань (y = +a)
         {2, 7, 3}, {2, 6, 7},
-        // Левая грань (x = -a)
         {0, 7, 4}, {0, 3, 7},
-        // Правая грань (x = +a)
         {1, 5, 6}, {1, 6, 2}
     };
     
@@ -243,11 +196,10 @@ __host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, 
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
         float3 normal = normalize(cross(edge1, edge2));
         
-        // Проверяем, направлена ли нормаль наружу от центра
         float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
         float3 outward = faceCenter - center;
         if (dot(normal, outward) < 0) {
-            normal = normal * (-1.0f);  // Инвертируем нормаль
+            normal = normal * (-1.0f);
         }
         
         triangles[i].normal = normal;
@@ -257,7 +209,6 @@ __host__ int generateHexahedronTriangles(float3* vertices, Triangle* triangles, 
 }
 
 __host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles, int bodyIndex, float3 center) {
-    // 20 граней икосаэдра
     int faces[20][3] = {
         {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11},
         {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
@@ -273,11 +224,10 @@ __host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles,
         float3 edge2 = triangles[i].v2 - triangles[i].v0;
         float3 normal = normalize(cross(edge1, edge2));
         
-        // Проверяем, направлена ли нормаль наружу от центра
         float3 faceCenter = (triangles[i].v0 + triangles[i].v1 + triangles[i].v2) / 3.0f;
         float3 outward = faceCenter - center;
         if (dot(normal, outward) < 0) {
-            normal = normal * (-1.0f);  // Инвертируем нормаль
+            normal = normal * (-1.0f);
         }
         
         triangles[i].normal = normal;
@@ -286,40 +236,28 @@ __host__ int generateIcosahedronTriangles(float3* vertices, Triangle* triangles,
     return 20;
 }
 
-// ============================================================================
-// Вычисление позиции камеры
-// ============================================================================
-
 __host__ Camera computeCamera(const CameraParams& params, float t, int width, int height, float fovDeg) {
     Camera cam;
     
-    // Позиция камеры в цилиндрических координатах
     float r_c = params.r_c0 + params.A_c_r * sinf(params.omega_c_r * t + params.p_c_r);
     float z_c = params.z_c0 + params.A_c_z * sinf(params.omega_c_z * t + params.p_c_z);
     float phi_c = params.phi_c0 + params.omega_c_phi * t;
     
-    // Точка направления камеры
     float r_n = params.r_n0 + params.A_n_r * sinf(params.omega_n_r * t + params.p_n_r);
     float z_n = params.z_n0 + params.A_n_z * sinf(params.omega_n_z * t + params.p_n_z);
     float phi_n = params.phi_n0 + params.omega_n_phi * t;
     
-    // Перевод в декартовы координаты
     cam.position = make_float3(r_c * cosf(phi_c), r_c * sinf(phi_c), z_c);
     float3 target = make_float3(r_n * cosf(phi_n), r_n * sinf(phi_n), z_n);
     
     cam.direction = normalize(target - cam.position);
     
-    // Вектор "вверх" (ось Z)
     float3 worldUp = make_float3(0.0f, 0.0f, 1.0f);
     cam.right = normalize(cross(cam.direction, worldUp));
     cam.up = normalize(cross(cam.right, cam.direction));
     
     return cam;
 }
-
-// ============================================================================
-// Пересечение луча с треугольником (алгоритм Моллера-Трумбора)
-// ============================================================================
 
 __device__ __host__ bool rayTriangleIntersect(
     const Ray& ray,
@@ -357,10 +295,6 @@ __device__ __host__ bool rayTriangleIntersect(
     return false;
 }
 
-// ============================================================================
-// Пересечение луча с полом (плоскость z = floorZ)
-// ============================================================================
-
 __device__ __host__ bool rayFloorIntersect(
     const Ray& ray,
     float floorZ,
@@ -382,11 +316,6 @@ __device__ __host__ bool rayFloorIntersect(
             hitPoint.y >= floorMinY && hitPoint.y <= floorMaxY);
 }
 
-// ============================================================================
-// CUDA Kernel для рендеринга
-// ============================================================================
-
-// Функция трассировки одного луча (device)
 __device__ float3 traceRay(
     Ray ray,
     Triangle* triangles, int numTriangles,
@@ -395,14 +324,13 @@ __device__ float3 traceRay(
     float floorZ, float floorMinX, float floorMaxX, float floorMinY, float floorMaxY,
     float3 floorColor
 ) {
-    float3 color = make_float3(0.0f, 0.0f, 0.0f);  // Черный фон
+    float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float minT = 1e30f;
     int hitBody = -1;
     float3 hitNormal;
     float3 hitPoint;
     bool hitFloor = false;
     
-    // Проверка пересечения с телами
     for (int i = 0; i < numTriangles; i++) {
         float t;
         float3 normal;
@@ -416,7 +344,6 @@ __device__ float3 traceRay(
         }
     }
     
-    // Проверка пересечения с полом
     float floorT;
     float3 floorHit;
     if (rayFloorIntersect(ray, floorZ, floorMinX, floorMaxX, floorMinY, floorMaxY, floorT, floorHit)) {
@@ -429,7 +356,6 @@ __device__ float3 traceRay(
         }
     }
     
-    // Расчет освещения
     if (hitBody >= 0) {
         float3 bodyColor = bodies[hitBody].color;
         
@@ -473,7 +399,6 @@ __device__ float3 traceRay(
             float3 lightDir = normalize(lights[i].position - hitPoint);
             float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
             
-            // Проверка тени на полу от объектов
             bool inShadow = false;
             Ray shadowRay;
             shadowRay.origin = hitPoint + hitNormal * 0.001f;
@@ -527,13 +452,10 @@ __global__ void renderKernel(
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     int numSamples = ssaaSqrt * ssaaSqrt;
     
-    // SSAA: выпускаем ssaaSqrt x ssaaSqrt лучей на пиксель
     for (int sy = 0; sy < ssaaSqrt; sy++) {
         for (int sx = 0; sx < ssaaSqrt; sx++) {
-            // Подсчет лучей
             atomicAdd(rayCounter, 1ULL);
             
-            // Субпиксельное смещение
             float subX = (sx + 0.5f) / ssaaSqrt;
             float subY = (sy + 0.5f) / ssaaSqrt;
             
@@ -559,12 +481,10 @@ __global__ void renderKernel(
         }
     }
     
-    // Усреднение
     color.x /= numSamples;
     color.y /= numSamples;
     color.z /= numSamples;
     
-    // Clamp и запись в буфер
     color.x = fminf(1.0f, fmaxf(0.0f, color.x));
     color.y = fminf(1.0f, fmaxf(0.0f, color.y));
     color.z = fminf(1.0f, fmaxf(0.0f, color.z));
@@ -573,14 +493,9 @@ __global__ void renderKernel(
     output[idx + 0] = (unsigned char)(color.x * 255.0f);
     output[idx + 1] = (unsigned char)(color.y * 255.0f);
     output[idx + 2] = (unsigned char)(color.z * 255.0f);
-    output[idx + 3] = 255;  // Alpha (fully opaque)
+    output[idx + 3] = 255;
 }
 
-// ============================================================================
-// CPU версия рендеринга
-// ============================================================================
-
-// CPU версия трассировки луча
 float3 traceRayCPU(
     Ray ray,
     Triangle* triangles, int numTriangles,
@@ -664,7 +579,6 @@ float3 traceRayCPU(
             float3 lightDir = normalize(lights[i].position - hitPoint);
             float diff = fmaxf(0.0f, dot(hitNormal, lightDir));
             
-            // Проверка тени на полу от объектов
             bool inShadow = false;
             Ray shadowRay;
             shadowRay.origin = hitPoint + hitNormal * 0.001f;
@@ -715,7 +629,6 @@ void renderCPU(
         for (int x = 0; x < width; x++) {
             float3 color = make_float3(0.0f, 0.0f, 0.0f);
             
-            // SSAA: выпускаем ssaaSqrt x ssaaSqrt лучей на пиксель
             for (int sy = 0; sy < ssaaSqrt; sy++) {
                 for (int sx = 0; sx < ssaaSqrt; sx++) {
                     rayCount++;
@@ -745,7 +658,6 @@ void renderCPU(
                 }
             }
             
-            // Усреднение
             color.x /= numSamples;
             color.y /= numSamples;
             color.z /= numSamples;
@@ -763,10 +675,6 @@ void renderCPU(
     }
 }
 
-// ============================================================================
-// Запись изображения в бинарном формате
-// ============================================================================
-
 bool writeImage(const std::string& path, int width, int height, const unsigned char* data) {
     std::ofstream fout(path, std::ios::binary);
     if (!fout) return false;
@@ -778,41 +686,25 @@ bool writeImage(const std::string& path, int width, int height, const unsigned c
     return fout.good();
 }
 
-// ============================================================================
-// Вывод конфигурации по умолчанию
-// ============================================================================
-
 void printDefaultConfig() {
-    printf("120\n");                                // количество кадров
-    printf("./output/frame_%%d.data\n");            // путь к изображениям
-    printf("1280 720 90\n");                        // разрешение и FOV (HD для красивого результата)
-    // Параметры камеры
-    printf("8.0 3.0 0.0 2.0 1.5 1.0 3.0 1.0 0.0 0.0\n");  // r_c0, z_c0, phi_c0, A_c_r, A_c_z, omega_c_r, omega_c_z, omega_c_phi, p_c_r, p_c_z
-    printf("0.5 0.5 0.0 0.2 0.3 0.5 1.5 1.0 0.0 0.0\n");  // r_n0, z_n0, phi_n0, A_n_r, A_n_z, omega_n_r, omega_n_z, omega_n_phi, p_n_r, p_n_z
-    // Тетраэдр: центр, цвет, радиус, reflection, transparency, edge lights
+    printf("120\n");
+    printf("./output/frame_%%d.data\n");
+    printf("1280 720 90\n");
+    printf("8.0 3.0 0.0 2.0 1.5 1.0 3.0 1.0 0.0 0.0\n");
+    printf("0.5 0.5 0.0 0.2 0.3 0.5 1.5 1.0 0.0 0.0\n");
     printf("2.5 0.0 1.0 1.0 0.3 0.3 1.0 0.0 0.0 0\n");
-    // Гексаэдр
     printf("-2.0 2.5 0.8 0.3 1.0 0.3 0.9 0.0 0.0 0\n");
-    // Икосаэдр
     printf("0.0 -2.5 1.2 0.3 0.3 1.0 1.1 0.0 0.0 0\n");
-    // Пол: 4 точки, текстура (не используется), оттенок, reflection
     printf("-8.0 -8.0 -0.5 -8.0 8.0 -0.5 8.0 8.0 -0.5 8.0 -8.0 -0.5 none 0.9 0.9 0.9 0.0\n");
-    // Источники света
     printf("1\n");
     printf("0.0 0.0 15.0 1.0 1.0 1.0\n");
-    // Глубина рекурсии и SSAA (4x4 = 16 лучей на пиксель для сглаживания)
     printf("1 4\n");
 }
-
-// ============================================================================
-// Main
-// ============================================================================
 
 int main(int argc, char** argv) {
     bool useGPU = true;
     bool printDefault = false;
     
-    // Парсинг аргументов командной строки
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--cpu") == 0) {
             useGPU = false;
@@ -828,7 +720,6 @@ int main(int argc, char** argv) {
         return 0;
     }
     
-    // Чтение параметров из stdin
     int numFrames;
     char outputPath[512];
     int width, height;
@@ -847,7 +738,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Параметры камеры
     CameraParams camParams;
     if (scanf("%f %f %f %f %f %f %f %f %f %f",
         &camParams.r_c0, &camParams.z_c0, &camParams.phi_c0,
@@ -866,7 +756,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Тела (3 штуки для варианта 3)
     const int NUM_BODIES = 3;
     Body bodies[NUM_BODIES];
     
@@ -890,7 +779,6 @@ int main(int argc, char** argv) {
         bodies[i].edgeLights = edgeLights;
     }
     
-    // Пол
     float floorPoints[12];
     char floorTexture[512];
     float floorTintR, floorTintG, floorTintB, floorReflection;
@@ -906,14 +794,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    float floorZ = floorPoints[2];  // z координата пола
+    float floorZ = floorPoints[2];
     float floorMinX = fminf(fminf(floorPoints[0], floorPoints[3]), fminf(floorPoints[6], floorPoints[9]));
     float floorMaxX = fmaxf(fmaxf(floorPoints[0], floorPoints[3]), fmaxf(floorPoints[6], floorPoints[9]));
     float floorMinY = fminf(fminf(floorPoints[1], floorPoints[4]), fminf(floorPoints[7], floorPoints[10]));
     float floorMaxY = fmaxf(fmaxf(floorPoints[1], floorPoints[4]), fmaxf(floorPoints[7], floorPoints[10]));
     float3 floorColor = make_float3(floorTintR, floorTintG, floorTintB);
     
-    // Источники света
     int numLights;
     if (scanf("%d", &numLights) != 1) {
         fprintf(stderr, "Error reading number of lights\n");
@@ -931,17 +818,14 @@ int main(int argc, char** argv) {
         lights[i].color = make_float3(r, g, b);
     }
     
-    // Глубина рекурсии и SSAA (не используется на оценку 3)
     int maxDepth, ssaaSqrt;
     if (scanf("%d %d", &maxDepth, &ssaaSqrt) != 2) {
         fprintf(stderr, "Error reading recursion depth and SSAA\n");
         return 1;
     }
     
-    // Генерация треугольников для всех тел
     std::vector<Triangle> allTriangles;
     
-    // Тетраэдр (тело 0)
     {
         float3 vertices[TETRAHEDRON_VERTICES];
         Triangle tris[TETRAHEDRON_FACES];
@@ -950,7 +834,6 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; i++) allTriangles.push_back(tris[i]);
     }
     
-    // Гексаэдр (тело 1)
     {
         float3 vertices[HEXAHEDRON_VERTICES];
         Triangle tris[HEXAHEDRON_TRIANGLES];
@@ -959,7 +842,6 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; i++) allTriangles.push_back(tris[i]);
     }
     
-    // Икосаэдр (тело 2)
     {
         float3 vertices[ICOSAHEDRON_VERTICES];
         Triangle tris[ICOSAHEDRON_FACES];
@@ -970,14 +852,12 @@ int main(int argc, char** argv) {
     
     int numTriangles = (int)allTriangles.size();
     
-    // Выделение памяти
     size_t imageSize = width * height * 4;
     std::vector<unsigned char> hostImage(imageSize);
     
     float fovRad = fovDeg * 3.14159265f / 180.0f;
     
     if (useGPU) {
-        // GPU рендеринг
         unsigned char* devImage;
         Triangle* devTriangles;
         Body* devBodies;
@@ -1030,13 +910,11 @@ int main(int argc, char** argv) {
             cudaMemcpy(&rayCount, devRayCounter, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
             cudaMemcpy(hostImage.data(), devImage, imageSize, cudaMemcpyDeviceToHost);
             
-            // Формирование пути к файлу
             char framePath[512];
             snprintf(framePath, sizeof(framePath), outputPath, frame);
             
             writeImage(framePath, width, height, hostImage.data());
             
-            // Вывод статистики
             printf("%d\t%lld\t%llu\n", frame, (long long)duration.count(), rayCount);
         }
         
@@ -1047,7 +925,6 @@ int main(int argc, char** argv) {
         cudaFree(devRayCounter);
         
     } else {
-        // CPU рендеринг
         for (int frame = 0; frame < numFrames; frame++) {
             float t = (float)frame / (float)numFrames * 2.0f * 3.14159265f;
             
