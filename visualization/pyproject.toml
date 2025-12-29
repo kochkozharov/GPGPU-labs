@@ -1,0 +1,18 @@
+[project]
+name = "raytracing-visualization"
+version = "0.1.0"
+description = "3D visualization of ray tracing scene with camera trajectories"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visualization"]
+
